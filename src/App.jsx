@@ -72,6 +72,7 @@ export default function App(){
   const [advice, setAdvice] = useState({});
   const [loadingKey, setLoadingKey] = useState(null);
   const [saveMsg, setSaveMsg] = useState("");
+  const [carried, setCarried] = useState(false);
 
   useEffect(()=>{
     try{ const raw = localStorage.getItem(STORE_KEY);
@@ -84,6 +85,40 @@ export default function App(){
       setSaveMsg("保存しました"); setTimeout(()=>setSaveMsg(""),1500);
     }catch(e){ setSaveMsg("保存に失敗"); }
   };
+
+  // 前月のPDCA/課題を当月へ引き継ぐ（当月が未入力のときだけ） ------------
+  const hasPDCAContent = (md)=>{
+    if(!md) return false;
+    const anyPdca = Object.values(md.pdca||{}).some(p=>p&&(p.plan||p.do||p.check||p.act));
+    const anyTask = (md.tasks||[]).length>0;
+    return anyPdca || anyTask;
+  };
+  useEffect(()=>{
+    if(!loaded || month===0) return;
+    const cur = data[month];
+    const prev = data[month-1];
+    // 当月に既にPDCA/課題の中身がある、または前月に何も無いなら何もしない
+    if(hasPDCAContent(cur) || !hasPDCAContent(prev)) return;
+    // 前月の数値目標PDCA（テキスト）を引き継ぐ
+    const carriedPdca = {};
+    Object.entries(prev.pdca||{}).forEach(([k,p])=>{
+      if(p&&(p.plan||p.do||p.check||p.act)) carriedPdca[k]={...p};
+    });
+    // 前月のフリー課題を引き継ぐ（達成度は0%にリセット、IDは新規）
+    const carriedTasks = (prev.tasks||[]).map((t,i)=>({
+      id:"t"+Date.now()+"_"+i, title:t.title, progress:0,
+      pdca:{...(t.pdca||blankPDCA())}
+    }));
+    const merged = {
+      actuals: (cur&&cur.actuals)||{},
+      pdca: carriedPdca,
+      tasks: carriedTasks,
+    };
+    persist({...data,[month]:merged});
+    setCarried(true);
+    setTimeout(()=>setCarried(false),4000);
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  },[month,loaded]);
 
   const mData = data[month] || {actuals:{}, pdca:{}, tasks:[]};
   const tasks = mData.tasks || [];
@@ -219,6 +254,12 @@ Act: ${p.act||"（未記入）"}
             onClick={()=>setMonth(i)}>{m}{filled&&<i className="dot"/>}</button>;
         })}
       </nav>
+
+      {carried && (
+        <div className="carry-banner">
+          前月（{MONTHS[(month+11)%12]}）のPDCA・課題を引き継ぎました。内容を確認・更新してください。
+        </div>
+      )}
 
       <section className="summary">
         <div className="sum-score">
@@ -368,6 +409,8 @@ h1{font-size:22px;margin:0;letter-spacing:.02em}
 .hd-mark{width:54px;height:54px;border-radius:14px;flex:none;display:grid;place-items:center;
   background:linear-gradient(135deg,var(--kiln),var(--kiln2));color:#fff;font-weight:800;
   letter-spacing:.06em;font-size:14px;box-shadow:0 6px 18px rgba(194,96,58,.32)}
+.carry-banner{background:#eef4f2;border:1px solid #cfe0db;border-left:4px solid var(--sea);
+  border-radius:10px;padding:10px 14px;margin-bottom:14px;font-size:12.5px;color:#23403c;font-weight:600}
 .savechip{position:absolute;right:0;top:0;background:var(--sea);color:#fff;font-size:11px;
   padding:4px 10px;border-radius:20px}
 .months{display:flex;flex-wrap:wrap;gap:6px;margin-bottom:16px}
