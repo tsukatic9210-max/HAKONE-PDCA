@@ -41,20 +41,43 @@ function grade(s){
 const yen = n => n==null||n===""?"—":"¥"+Number(n).toLocaleString();
 const num = n => n==null||n===""?"—":Number(n).toLocaleString();
 
-function buildItems(m){
+// 既定の予算（コード固定値）。画面で上書きがあればそちらを優先する。
+const DEFAULT_BUDGETS = {
+  sales: SALES_BUDGET, expense: EXPENSE_BUDGET,
+  unitprice: UNITPRICE_BUDGET, customers: CUSTOMERS_BUDGET,
+  inbound: INBOUND_BUDGET, reviews: Array(12).fill(REVIEW_TARGET),
+  goodsSales: GOODS_SALES_BUDGET, goodsBuy: GOODS_BUY_BUDGET,
+};
+// 月mのキーkeyの予算を返す（上書き優先）
+function budgetOf(key, m, ov){
+  const o = ov && ov[key] && ov[key][m];
+  if(o!=="" && o!=null && !Number.isNaN(Number(o))) return Number(o);
+  const def = DEFAULT_BUDGETS[key];
+  return def ? def[m] : 0;
+}
+
+function buildItems(m, ov){
+  const b = (k)=>budgetOf(k,m,ov);
   return [
-    {key:"sales", no:"①", name:"売上", dir:"higher", budget:SALES_BUDGET[m], fmt:yen, src:"箱根支店収支予算表"},
-    {key:"expense", no:"②", name:"支出", dir:"lower", budget:EXPENSE_BUDGET[m], fmt:yen, src:"箱根支店収支予算表",
+    {key:"sales", no:"①", name:"売上", dir:"higher", budget:b("sales"), fmt:yen, src:"箱根支店収支予算表"},
+    {key:"expense", no:"②", name:"支出", dir:"lower", budget:b("expense"), fmt:yen, src:"箱根支店収支予算表",
      note:"※収支予算表に独立した支出予算行が無いため初期値は売上予算と同額。実態に合わせて調整可。"},
-    {key:"profit", no:"③", name:"利益（売上−支出）", dir:"higher", budget:SALES_BUDGET[m]-EXPENSE_BUDGET[m], fmt:yen, derived:true, src:"①−②より算出"},
-    {key:"unitprice", no:"④a", name:"客単価", dir:"higher", budget:UNITPRICE_BUDGET[m], fmt:yen, src:"客単価客数予算表"},
-    {key:"customers", no:"④b", name:"客数", dir:"higher", budget:CUSTOMERS_BUDGET[m], fmt:num, src:"客単価客数予算表"},
-    {key:"inbound", no:"⑤", name:"インバウンド客数", dir:"higher", budget:INBOUND_BUDGET[m], fmt:num, src:"客単価客数予算表"},
-    {key:"reviews", no:"⑥", name:"Googleクチコミ数", dir:"higher", budget:REVIEW_TARGET, fmt:num, src:"目標 月間200件"},
-    {key:"goodsSales", no:"⑦", name:"物販 売上", dir:"higher", budget:GOODS_SALES_BUDGET[m], fmt:yen, src:"物販売上仕入予算表"},
-    {key:"goodsBuy", no:"⑧", name:"物販 仕入", dir:"lower", budget:GOODS_BUY_BUDGET[m], fmt:yen, src:"物販売上仕入予算表"},
+    {key:"profit", no:"③", name:"利益（売上−支出）", dir:"higher", budget:b("sales")-b("expense"), fmt:yen, derived:true, src:"①−②より算出"},
+    {key:"unitprice", no:"④a", name:"客単価", dir:"higher", budget:b("unitprice"), fmt:yen, src:"客単価客数予算表"},
+    {key:"customers", no:"④b", name:"客数", dir:"higher", budget:b("customers"), fmt:num, src:"客単価客数予算表"},
+    {key:"inbound", no:"⑤", name:"インバウンド客数", dir:"higher", budget:b("inbound"), fmt:num, src:"客単価客数予算表"},
+    {key:"reviews", no:"⑥", name:"Googleクチコミ数", dir:"higher", budget:b("reviews"), fmt:num, src:"目標 月間200件"},
+    {key:"goodsSales", no:"⑦", name:"物販 売上", dir:"higher", budget:b("goodsSales"), fmt:yen, src:"物販売上仕入予算表"},
+    {key:"goodsBuy", no:"⑧", name:"物販 仕入", dir:"lower", budget:b("goodsBuy"), fmt:yen, src:"物販売上仕入予算表"},
   ];
 }
+// 編集可能な予算項目（利益は派生なので除く）
+const BUDGET_ITEMS = [
+  {key:"sales",no:"①",name:"売上",fmt:"yen"},{key:"expense",no:"②",name:"支出",fmt:"yen"},
+  {key:"unitprice",no:"④a",name:"客単価",fmt:"yen"},{key:"customers",no:"④b",name:"客数",fmt:"num"},
+  {key:"inbound",no:"⑤",name:"インバウンド",fmt:"num"},{key:"reviews",no:"⑥",name:"クチコミ",fmt:"num"},
+  {key:"goodsSales",no:"⑦",name:"物販売上",fmt:"yen"},{key:"goodsBuy",no:"⑧",name:"物販仕入",fmt:"yen"},
+];
 
 const PDCA_FIELDS = [
   {k:"plan", label:"Plan（計画）", ph:"目標達成のための今月の打ち手・施策を記入"},
@@ -78,6 +101,7 @@ export default function App(){
   const [carried, setCarried] = useState(false);
   const [carriedFrom, setCarriedFrom] = useState("");
   const [summaryLoading, setSummaryLoading] = useState(false);
+  const [view, setView] = useState("monthly"); // monthly | grid | budget
 
   useEffect(()=>{
     let st = {years:{}, summaries:{}};
@@ -107,6 +131,23 @@ export default function App(){
   const data = (store.years&&store.years[year]) || {};
   const persist = (nextData)=>{
     persistStore({...store, years:{...store.years, [year]:nextData}});
+  };
+
+  // 予算の上書き値（年度ごと）。{key:{month:value}}
+  const budgetOv = (store.budgets&&store.budgets[year]) || {};
+  const setBudget = (key, m, val)=>{
+    const cur = store.budgets || {};
+    const yv = {...(cur[year]||{})};
+    const kv = {...(yv[key]||{})};
+    if(val===""||val==null) delete kv[m]; else kv[m]=Number(val);
+    yv[key]=kv;
+    persistStore({...store, budgets:{...cur,[year]:yv}});
+  };
+  const resetBudgets = ()=>{
+    if(!confirm(year+"年度の予算編集をすべて消し、初期値（既定の予算）に戻しますか？")) return;
+    const cur = {...(store.budgets||{})};
+    delete cur[year];
+    persistStore({...store, budgets:cur});
   };
 
   // 前月のPDCA/課題を当月へ引き継ぐ（当月が未入力のときだけ） ------------
@@ -150,7 +191,7 @@ export default function App(){
 
   const mData = data[month] || {actuals:{}, pdca:{}, tasks:[]};
   const tasks = mData.tasks || [];
-  const items = useMemo(()=>buildItems(month),[month]);
+  const items = useMemo(()=>buildItems(month, budgetOv),[month, budgetOv]);
 
   // フリー課題 CRUD ------------------------------------------------------
   const setTasks = (nextTasks)=>{
@@ -185,6 +226,22 @@ export default function App(){
   const setActual = (key,val)=>{
     const next={...data,[month]:{...mData,actuals:{...mData.actuals,[key]:val===""?"":Number(val)}}};
     persist(next);
+  };
+  // 任意の月の実績を設定（一覧入力用）
+  const setActualAt = (m,key,val)=>{
+    const md = data[m] || {actuals:{}, pdca:{}, tasks:[]};
+    const next={...data,[m]:{...md,actuals:{...md.actuals,[key]:val===""?"":Number(val)}}};
+    persist(next);
+  };
+  // 任意の月・キーの実績値を取得
+  const actualAt = (m,key)=>{
+    const md = data[m]; if(!md) return "";
+    if(key==="profit"){
+      const s=md.actuals?.sales, e=md.actuals?.expense;
+      if(s===""||s==null||e===""||e==null) return "";
+      return Number(s)-Number(e);
+    }
+    return md.actuals?.[key] ?? "";
   };
   const setPDCA = (key,field,val)=>{
     const cur = mData.pdca[key]||blankPDCA();
@@ -267,7 +324,7 @@ Act: ${p.act||"（未記入）"}
     for(let m=0;m<12;m++){
       const md = data[m];
       if(!md) { lines.push(`${MONTHS[m]}：実績入力なし`); continue; }
-      const its = buildItems(m);
+      const its = buildItems(m, budgetOv);
       const parts = its.map(it=>{
         let a;
         if(it.key==="profit"){
@@ -351,6 +408,14 @@ ${lines.join("\n")}
         </details>
       )}
 
+      {/* 表示切替タブ */}
+      <nav className="vtabs">
+        <button className={"vtab"+(view==="monthly"?" on":"")} onClick={()=>setView("monthly")}>月次管理</button>
+        <button className={"vtab"+(view==="grid"?" on":"")} onClick={()=>setView("grid")}>実績一覧入力</button>
+        <button className={"vtab"+(view==="budget"?" on":"")} onClick={()=>setView("budget")}>予算・目標の編集</button>
+      </nav>
+
+      {view==="monthly" && (<>
       <nav className="months">
         {MONTHS.map((m,i)=>{
           const d=data[i]; const filled = d && Object.values(d.actuals||{}).some(v=>v!==""&&v!=null);
@@ -488,6 +553,86 @@ ${lines.join("\n")}
           })}
         </div>
       )}
+      </>)}
+
+      {/* 実績一覧入力（12か月 × 8項目グリッド） */}
+      {view==="grid" && (
+        <section className="tablewrap">
+          <p className="thint">各月・各項目の実績を直接入力できます。利益（③）は売上−支出から自動計算です。色は評価点（達成=緑〜未達=赤）。</p>
+          <div className="scroll-x">
+            <table className="gtable">
+              <thead>
+                <tr>
+                  <th className="sticky-l">項目＼月</th>
+                  {MONTHS.map((m,i)=><th key={i}>{m}</th>)}
+                </tr>
+              </thead>
+              <tbody>
+                {buildItems(0,budgetOv).map(it=>(
+                  <tr key={it.key}>
+                    <th className="sticky-l rowh"><b>{it.no}</b>{it.name}</th>
+                    {MONTHS.map((m,mi)=>{
+                      const itm = buildItems(mi,budgetOv).find(x=>x.key===it.key);
+                      const a = actualAt(mi,it.key);
+                      const sc = it.dir==="lower"?scoreLower(a,itm.budget):scoreHigher(a,itm.budget);
+                      const cls = grade(sc).cls;
+                      if(it.derived){
+                        return <td key={mi} className={"gcell derived "+cls}>{a===""?"—":Number(a).toLocaleString()}</td>;
+                      }
+                      return (
+                        <td key={mi} className={"gcell "+(a===""?"":cls)}>
+                          <input type="number" inputMode="numeric"
+                            value={data[mi]?.actuals?.[it.key] ?? ""} placeholder="—"
+                            onChange={e=>setActualAt(mi,it.key,e.target.value)}/>
+                        </td>
+                      );
+                    })}
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          </div>
+        </section>
+      )}
+
+      {/* 予算・目標の編集 */}
+      {view==="budget" && (
+        <section className="tablewrap">
+          <div className="bhead">
+            <p className="thint">各月・各項目の予算／目標を編集できます。空欄にすると既定値（初期の予算）に戻ります。9年度以降の予算もここで入力できます。</p>
+            <button className="reset-btn" onClick={resetBudgets}>この年度の予算編集をリセット</button>
+          </div>
+          <div className="scroll-x">
+            <table className="gtable">
+              <thead>
+                <tr>
+                  <th className="sticky-l">項目＼月</th>
+                  {MONTHS.map((m,i)=><th key={i}>{m}</th>)}
+                </tr>
+              </thead>
+              <tbody>
+                {BUDGET_ITEMS.map(bi=>(
+                  <tr key={bi.key}>
+                    <th className="sticky-l rowh"><b>{bi.no}</b>{bi.name}</th>
+                    {MONTHS.map((m,mi)=>{
+                      const edited = budgetOv[bi.key] && budgetOv[bi.key][mi]!=null && budgetOv[bi.key][mi]!=="";
+                      return (
+                        <td key={mi} className={"gcell"+(edited?" edited":"")}>
+                          <input type="number" inputMode="numeric"
+                            value={budgetOv[bi.key]?.[mi] ?? ""}
+                            placeholder={String(DEFAULT_BUDGETS[bi.key][mi])}
+                            onChange={e=>setBudget(bi.key,mi,e.target.value)}/>
+                        </td>
+                      );
+                    })}
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          </div>
+          <p className="thint">※ 利益（③）は売上−支出から自動計算されるため、ここには表示していません。プレースホルダの薄い数字が既定値です。</p>
+        </section>
+      )}
 
       {/* 年度総括レポート */}
       <section className="yearend">
@@ -559,6 +704,35 @@ h1{font-size:22px;margin:0;letter-spacing:.02em}
 .ye-meta{font-size:11px;color:#9a9180;margin-bottom:10px}
 .ye-text{font-size:13px;line-height:1.9;white-space:pre-wrap;color:var(--ink)}
 .ye-note{margin-top:14px;padding-top:10px;border-top:1px dashed var(--line);font-size:11.5px;color:#7a7363}
+.vtabs{display:flex;gap:4px;margin-bottom:14px;background:#ece5d6;padding:4px;border-radius:11px;width:fit-content;flex-wrap:wrap}
+.vtab{border:none;background:transparent;color:#6c6555;padding:8px 16px;border-radius:8px;
+  font-size:13px;font-weight:700;cursor:pointer;transition:.15s}
+.vtab:hover{color:var(--ink)}
+.vtab.on{background:#fff;color:var(--ink);box-shadow:0 1px 4px rgba(0,0,0,.08)}
+.tablewrap{background:var(--card);border:1px solid var(--line);border-radius:14px;padding:16px}
+.thint{font-size:12px;color:#7a7363;margin:0 0 12px;line-height:1.6}
+.bhead{display:flex;justify-content:space-between;align-items:flex-start;gap:12px;flex-wrap:wrap}
+.reset-btn{flex:none;border:1px solid var(--line);background:#faf6ec;color:#9a6650;
+  padding:7px 13px;border-radius:8px;font-size:12px;font-weight:700;cursor:pointer}
+.reset-btn:hover{border-color:var(--bad);color:var(--bad)}
+.scroll-x{overflow-x:auto;-webkit-overflow-scrolling:touch}
+.gtable{border-collapse:separate;border-spacing:0;font-size:12px;min-width:760px}
+.gtable th,.gtable td{border-bottom:1px solid var(--line);border-right:1px solid var(--line);padding:0}
+.gtable thead th{background:#faf6ec;padding:8px 6px;font-size:11px;color:#6c6555;text-align:center;white-space:nowrap;position:sticky;top:0}
+.gtable .sticky-l{position:sticky;left:0;z-index:2;background:#faf6ec;text-align:left;
+  padding:8px 10px;white-space:nowrap;min-width:128px}
+.gtable .rowh{font-weight:600;color:var(--ink)}
+.gtable .rowh b{color:var(--kiln);margin-right:5px}
+.gcell{text-align:right}
+.gcell input{width:100%;min-width:78px;border:none;background:transparent;padding:8px 8px;
+  font-size:12px;text-align:right;font-family:inherit;color:var(--ink);font-feature-settings:"tnum"}
+.gcell input:focus{outline:2px solid var(--kiln2);outline-offset:-2px;background:#fff}
+.gcell input::placeholder{color:#c9c2b4}
+.gcell.derived{padding:8px 8px;color:#6c6555;font-feature-settings:"tnum"}
+.gcell.sss{background:rgba(31,122,90,.14)}.gcell.good{background:rgba(47,107,107,.13)}
+.gcell.ok{background:rgba(122,154,58,.13)}.gcell.warn{background:rgba(211,160,32,.15)}
+.gcell.bad{background:rgba(194,96,58,.13)}
+.gcell.edited input{background:rgba(194,96,58,.08);font-weight:700}
 .savechip{position:absolute;right:0;top:0;background:var(--sea);color:#fff;font-size:11px;
   padding:4px 10px;border-radius:20px}
 .months{display:flex;flex-wrap:wrap;gap:6px;margin-bottom:16px}
