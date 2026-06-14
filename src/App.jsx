@@ -63,27 +63,50 @@ const PDCA_FIELDS = [
   {k:"act",  label:"Act（改善）",   ph:"次月への改善アクションを記入"},
 ];
 const blankPDCA = () => ({plan:"",do:"",check:"",act:""});
-const STORE_KEY = "hakone_pdca_8";
+const STORE_KEY = "hakone_pdca_store";   // 新形式（年度対応）
+const OLD_KEY   = "hakone_pdca_8";        // 旧形式（8年度のみ・自動移行）
+const YEARS = [8,9,10,11,12];             // 管理できる年度（後で増やせる）
 
 export default function App(){
+  const [year, setYear] = useState(8);
   const [month, setMonth] = useState(0);
-  const [data, setData] = useState({});
+  const [store, setStore] = useState({years:{}, summaries:{}});
   const [loaded, setLoaded] = useState(false);
   const [advice, setAdvice] = useState({});
   const [loadingKey, setLoadingKey] = useState(null);
   const [saveMsg, setSaveMsg] = useState("");
   const [carried, setCarried] = useState(false);
+  const [carriedFrom, setCarriedFrom] = useState("");
+  const [summaryLoading, setSummaryLoading] = useState(false);
 
   useEffect(()=>{
-    try{ const raw = localStorage.getItem(STORE_KEY);
-      if(raw) setData(JSON.parse(raw)); }catch(e){}
+    let st = {years:{}, summaries:{}};
+    try{
+      const raw = localStorage.getItem(STORE_KEY);
+      if(raw){ st = JSON.parse(raw); }
+      else {
+        // 旧データ（年度なし）があれば8年度として移行
+        const old = localStorage.getItem(OLD_KEY);
+        if(old){ st = {years:{8:JSON.parse(old)}, summaries:{}}; }
+      }
+    }catch(e){}
+    if(!st.years) st.years={};
+    if(!st.summaries) st.summaries={};
+    setStore(st);
     setLoaded(true);
   },[]);
-  const persist = (next)=>{
-    setData(next);
+
+  const persistStore = (next)=>{
+    setStore(next);
     try{ localStorage.setItem(STORE_KEY, JSON.stringify(next));
       setSaveMsg("保存しました"); setTimeout(()=>setSaveMsg(""),1500);
     }catch(e){ setSaveMsg("保存に失敗"); }
+  };
+
+  // 現在の年度の月データ（data）を従来どおり扱えるようにする
+  const data = (store.years&&store.years[year]) || {};
+  const persist = (nextData)=>{
+    persistStore({...store, years:{...store.years, [year]:nextData}});
   };
 
   // 前月のPDCA/課題を当月へ引き継ぐ（当月が未入力のときだけ） ------------
@@ -94,31 +117,36 @@ export default function App(){
     return anyPdca || anyTask;
   };
   useEffect(()=>{
-    if(!loaded || month===0) return;
+    if(!loaded) return;
     const cur = data[month];
-    const prev = data[month-1];
-    // 当月に既にPDCA/課題の中身がある、または前月に何も無いなら何もしない
-    if(hasPDCAContent(cur) || !hasPDCAContent(prev)) return;
-    // 前月の数値目標PDCA（テキスト）を引き継ぐ
+    if(hasPDCAContent(cur)) return; // 当月に既に中身があれば触らない
+
+    // 4月（月0）は前年度3月から、それ以外は同年度の前月から引き継ぐ
+    let prev, fromLabel;
+    if(month===0){
+      const prevYearData = (store.years&&store.years[year-1]) || {};
+      prev = prevYearData[11]; // 前年度3月
+      fromLabel = (year-1)+"年度3月";
+    } else {
+      prev = data[month-1];
+      fromLabel = MONTHS[month-1];
+    }
+    if(!hasPDCAContent(prev)) return;
+
     const carriedPdca = {};
     Object.entries(prev.pdca||{}).forEach(([k,p])=>{
       if(p&&(p.plan||p.do||p.check||p.act)) carriedPdca[k]={...p};
     });
-    // 前月のフリー課題を引き継ぐ（達成度は0%にリセット、IDは新規）
     const carriedTasks = (prev.tasks||[]).map((t,i)=>({
       id:"t"+Date.now()+"_"+i, title:t.title, progress:0,
       pdca:{...(t.pdca||blankPDCA())}
     }));
-    const merged = {
-      actuals: (cur&&cur.actuals)||{},
-      pdca: carriedPdca,
-      tasks: carriedTasks,
-    };
-    persist({...data,[month]:merged});
+    persist({...data,[month]:{actuals:(cur&&cur.actuals)||{}, pdca:carriedPdca, tasks:carriedTasks}});
+    setCarriedFrom(fromLabel);
     setCarried(true);
-    setTimeout(()=>setCarried(false),4000);
+    setTimeout(()=>setCarried(false),4500);
   // eslint-disable-next-line react-hooks/exhaustive-deps
-  },[month,loaded]);
+  },[month,year,loaded]);
 
   const mData = data[month] || {actuals:{}, pdca:{}, tasks:[]};
   const tasks = mData.tasks || [];
@@ -233,6 +261,67 @@ Act: ${p.act||"（未記入）"}
     await callAdvice("task_"+t.id, prompt);
   };
 
+  // 年度総括レポート（AI） ------------------------------------------------
+  const buildYearReportPrompt = ()=>{
+    const lines = [];
+    for(let m=0;m<12;m++){
+      const md = data[m];
+      if(!md) { lines.push(`${MONTHS[m]}：実績入力なし`); continue; }
+      const its = buildItems(m);
+      const parts = its.map(it=>{
+        let a;
+        if(it.key==="profit"){
+          const s=md.actuals?.sales, e=md.actuals?.expense;
+          a=(s==null||s===""||e==null||e==="")?"":Number(s)-Number(e);
+        } else a = md.actuals?.[it.key] ?? "";
+        const sc = it.dir==="lower"? scoreLower(a,it.budget): scoreHigher(a,it.budget);
+        return `${it.name}=${a===""?"未":it.fmt(a)}(予算${it.fmt(it.budget)}/評価${sc==null?"-":sc}点)`;
+      });
+      const pdcaTxt = Object.entries(md.pdca||{}).map(([k,p])=>{
+        const it = its.find(x=>x.key===k); if(!p) return null;
+        const t=[p.plan&&"P:"+p.plan,p.do&&"D:"+p.do,p.check&&"C:"+p.check,p.act&&"A:"+p.act].filter(Boolean).join(" / ");
+        return t?`  ・${it?it.name:k}→${t}`:null;
+      }).filter(Boolean);
+      const taskTxt = (md.tasks||[]).map(t=>`  ・課題「${t.title||"無題"}」達成度${t.progress||0}%`);
+      lines.push(`【${MONTHS[m]}】 ${parts.join(" / ")}` +
+        (pdcaTxt.length?`\n${pdcaTxt.join("\n")}`:"") +
+        (taskTxt.length?`\n${taskTxt.join("\n")}`:""));
+    }
+    return `あなたは箱根の体験型店舗（吹きガラス・陶芸・とんぼ玉・物販等）の経営アドバイザーです。
+以下は${year}年度（4月〜翌3月）の月次PDCA管理データです。これを基に、年度の総括レポートを作成してください。
+
+${lines.join("\n")}
+
+次の構成で、日本語で、店舗マネージャーと経営層が読む報告書として作成してください（全体900〜1200字）。
+1. 年度総評（数値目標①〜⑧の達成状況を総括。好調だった項目・苦戦した項目を具体的に）
+2. PDCAの振り返り（実施した施策のうち効果が出たもの／不発だったもの。フリー課題の進捗も含む）
+3. 来年度への提言（重点的に取り組むべきこと3〜5点。具体的なアクションで）
+4. 来年度4月にすぐ着手すべきこと（1〜2点）
+見出しは【】で示し、箇条書きを適度に使って読みやすく。`;
+  };
+
+  const generateYearReport = async ()=>{
+    setSummaryLoading(true);
+    const prompt = buildYearReportPrompt();
+    try{
+      const res = await fetch("/.netlify/functions/advice",{
+        method:"POST", headers:{"Content-Type":"application/json"},
+        body:JSON.stringify({prompt})
+      });
+      const d = await res.json();
+      const text = d.text || d.error || "総括レポートを生成できませんでした。";
+      persistStore({...store, years:{...store.years,[year]:data},
+        summaries:{...store.summaries,[year]:{text, createdAt:new Date().toLocaleString("ja-JP")}}});
+    }catch(e){
+      persistStore({...store, summaries:{...store.summaries,
+        [year]:{text:"通信エラーが発生しました。時間をおいて再度お試しください。", createdAt:new Date().toLocaleString("ja-JP")}}});
+    }
+    setSummaryLoading(false);
+  };
+
+  const yearSummary = store.summaries?.[year];
+  const prevYearSummary = store.summaries?.[year-1];
+
   if(!loaded) return <div style={{padding:40,fontFamily:"sans-serif"}}>読み込み中…</div>;
 
   return (
@@ -241,11 +330,26 @@ Act: ${p.act||"（未記入）"}
       <header className="hd">
         <div className="hd-mark">PDCA</div>
         <div>
-          <h1>8年度 箱根アクションプラン管理</h1>
+          <h1>{year}年度 箱根アクションプラン管理</h1>
           <p className="sub">箱根クラフトハウス／マネージャー用 数値目標 × PDCA ・ 4月〜3月 月次管理</p>
         </div>
         {saveMsg && <span className="savechip">{saveMsg}</span>}
       </header>
+
+      <nav className="years">
+        <span className="years-lbl">年度</span>
+        {YEARS.map(y=>(
+          <button key={y} className={"ybtn"+(y===year?" on":"")}
+            onClick={()=>{setYear(y); setMonth(0);}}>{y}年度</button>
+        ))}
+      </nav>
+
+      {prevYearSummary && (
+        <details className="prevsum">
+          <summary>前年度（{year-1}年度）の総括を見る <span className="chev">▾</span></summary>
+          <div className="prevsum-body">{prevYearSummary.text}</div>
+        </details>
+      )}
 
       <nav className="months">
         {MONTHS.map((m,i)=>{
@@ -257,7 +361,7 @@ Act: ${p.act||"（未記入）"}
 
       {carried && (
         <div className="carry-banner">
-          前月（{MONTHS[(month+11)%12]}）のPDCA・課題を引き継ぎました。内容を確認・更新してください。
+          {carriedFrom}のPDCA・課題を引き継ぎました。内容を確認・更新してください。
         </div>
       )}
 
@@ -385,8 +489,28 @@ Act: ${p.act||"（未記入）"}
         </div>
       )}
 
+      {/* 年度総括レポート */}
+      <section className="yearend">
+        <div className="ye-head">
+          <div>
+            <h2>{year}年度 総括レポート（AI）</h2>
+            <p className="sub">1年分（4月〜3月）の数値達成状況とPDCAをAIがまとめ、評価・振り返り・次年度への提言を作成します。</p>
+          </div>
+          <button className="ye-btn" disabled={summaryLoading} onClick={generateYearReport}>
+            {summaryLoading?"AI が年度を分析中…":(yearSummary?"レポートを再生成":"年度総括を作成")}
+          </button>
+        </div>
+        {yearSummary && (
+          <div className="ye-out">
+            <div className="ye-meta">作成日時：{yearSummary.createdAt}</div>
+            <div className="ye-text">{yearSummary.text}</div>
+            <div className="ye-note">この総括は{year}年度に保存され、{year+1}年度を開くと「前年度の総括」として表示されます。</div>
+          </div>
+        )}
+      </section>
+
       <footer className="ft">
-        入力内容はこのブラウザに自動保存されます。月をまたいで記録を継続できます。
+        入力内容はこのブラウザに自動保存されます。年度・月をまたいで記録を継続できます。
       </footer>
     </div>
   );
@@ -411,6 +535,30 @@ h1{font-size:22px;margin:0;letter-spacing:.02em}
   letter-spacing:.06em;font-size:14px;box-shadow:0 6px 18px rgba(194,96,58,.32)}
 .carry-banner{background:#eef4f2;border:1px solid #cfe0db;border-left:4px solid var(--sea);
   border-radius:10px;padding:10px 14px;margin-bottom:14px;font-size:12.5px;color:#23403c;font-weight:600}
+.years{display:flex;align-items:center;gap:6px;margin-bottom:12px;flex-wrap:wrap}
+.years-lbl{font-size:11px;color:#7a7363;font-weight:700;margin-right:2px}
+.ybtn{border:1px solid var(--line);background:var(--card);color:#6c6555;padding:6px 14px;
+  border-radius:20px;font-size:12.5px;font-weight:700;cursor:pointer;transition:.15s}
+.ybtn:hover{border-color:var(--kiln)}
+.ybtn.on{background:var(--kiln);color:#fff;border-color:var(--kiln)}
+.prevsum{background:#fff8f3;border:1px solid #f0dcce;border-radius:12px;
+  padding:12px 16px;margin-bottom:14px}
+.prevsum summary{cursor:pointer;font-size:13px;font-weight:700;color:var(--kiln);list-style:none;
+  display:flex;justify-content:space-between;align-items:center}
+.prevsum summary::-webkit-details-marker{display:none}
+.prevsum[open] .chev{transform:rotate(180deg)}
+.prevsum-body{margin-top:10px;font-size:12.5px;line-height:1.8;white-space:pre-wrap;color:#4a3f33}
+.yearend{margin-top:30px;padding-top:20px;border-top:2px solid var(--line)}
+.ye-head{display:flex;justify-content:space-between;align-items:flex-end;gap:14px;flex-wrap:wrap;margin-bottom:14px}
+.yearend h2{font-size:18px;margin:0;letter-spacing:.02em}
+.ye-btn{flex:none;background:linear-gradient(135deg,var(--kiln),var(--kiln2));color:#fff;border:none;
+  border-radius:10px;padding:11px 18px;font-size:13.5px;font-weight:700;cursor:pointer;
+  box-shadow:0 4px 14px rgba(194,96,58,.3)}
+.ye-btn:disabled{opacity:.6;cursor:wait}
+.ye-out{background:var(--card);border:1px solid var(--line);border-radius:14px;padding:18px 20px}
+.ye-meta{font-size:11px;color:#9a9180;margin-bottom:10px}
+.ye-text{font-size:13px;line-height:1.9;white-space:pre-wrap;color:var(--ink)}
+.ye-note{margin-top:14px;padding-top:10px;border-top:1px dashed var(--line);font-size:11.5px;color:#7a7363}
 .savechip{position:absolute;right:0;top:0;background:var(--sea);color:#fff;font-size:11px;
   padding:4px 10px;border-radius:20px}
 .months{display:flex;flex-wrap:wrap;gap:6px;margin-bottom:16px}
