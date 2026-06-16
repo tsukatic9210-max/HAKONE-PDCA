@@ -1,8 +1,13 @@
-import React, { useState, useEffect, useMemo } from "react";
+import React, { useState, useEffect, useMemo, useRef } from "react";
+import { dbReady, loadShared, saveShared, fetchUpdatedAt } from "./db.js";
+
+const PASSCODE = "craft9210"; // 入口の合言葉（スタッフ共有）
+const SESSION_KEY = "hakone_authed";
 
 /* =========================================================================
-   8年度 箱根アクションプラン PDCA マネージャーアプリ（Netlify版）
-   - 保存: localStorage（この端末のブラウザに保存）
+   8年度 箱根アクションプラン PDCA マネージャーアプリ（Netlify版・共有対応）
+   - 保存: Supabase 共有データベース（全スタッフで共有）
+   - 入口: 合言葉（パスコード）
    - AIアドバイス: Netlify Function (/.netlify/functions/advice) 経由
    予算データ出典：
      8年度箱根支店収支予算表 / 8年度客単価客数予算表 / 8年度物販売上仕入予算表
@@ -102,29 +107,93 @@ export default function App(){
   const [carriedFrom, setCarriedFrom] = useState("");
   const [summaryLoading, setSummaryLoading] = useState(false);
   const [view, setView] = useState("monthly"); // monthly | grid | budget
+  const [authed, setAuthed] = useState(()=>{
+    try{ return sessionStorage.getItem(SESSION_KEY)==="1"; }catch(e){ return false; }
+  });
+  const [pwInput, setPwInput] = useState("");
+  const [pwError, setPwError] = useState(false);
+  const [online, setOnline] = useState(dbReady);
+  const saveTimer = useRef(null);
+  const lastSeenUpdate = useRef(null);
+  const skipNextSave = useRef(true);
 
+  // 初回ロード（共有DB優先、未設定ならローカル） --------------------------
   useEffect(()=>{
-    let st = {years:{}, summaries:{}};
-    try{
-      const raw = localStorage.getItem(STORE_KEY);
-      if(raw){ st = JSON.parse(raw); }
-      else {
-        // 旧データ（年度なし）があれば8年度として移行
-        const old = localStorage.getItem(OLD_KEY);
-        if(old){ st = {years:{8:JSON.parse(old)}, summaries:{}}; }
+    if(!authed) return;
+    let cancelled = false;
+    (async()=>{
+      let st = null;
+      if(dbReady){
+        try{
+          st = await loadShared();
+          lastSeenUpdate.current = await fetchUpdatedAt();
+          setOnline(true);
+        }catch(e){ setOnline(false); }
       }
-    }catch(e){}
-    if(!st.years) st.years={};
-    if(!st.summaries) st.summaries={};
-    setStore(st);
-    setLoaded(true);
-  },[]);
+      if(!st){
+        try{
+          const raw = localStorage.getItem(STORE_KEY);
+          if(raw) st = JSON.parse(raw);
+          else { const old = localStorage.getItem(OLD_KEY); if(old) st = {years:{8:JSON.parse(old)}}; }
+        }catch(e){}
+      }
+      if(!st) st = {};
+      if(!st.years) st.years={};
+      if(!st.summaries) st.summaries={};
+      if(!st.budgets) st.budgets={};
+      if(cancelled) return;
+      skipNextSave.current = true;
+      setStore(st);
+      setLoaded(true);
+    })();
+    return ()=>{ cancelled = true; };
+  },[authed]);
+
+  // 他スタッフの更新を10秒ごとに取り込む --------------------------------
+  useEffect(()=>{
+    if(!authed || !dbReady) return;
+    const iv = setInterval(async()=>{
+      try{
+        const u = await fetchUpdatedAt();
+        if(u && u !== lastSeenUpdate.current){
+          const fresh = await loadShared();
+          lastSeenUpdate.current = u;
+          if(fresh){
+            if(!fresh.years) fresh.years={};
+            if(!fresh.summaries) fresh.summaries={};
+            if(!fresh.budgets) fresh.budgets={};
+            skipNextSave.current = true;
+            setStore(fresh);
+          }
+        }
+        setOnline(true);
+      }catch(e){ setOnline(false); }
+    }, 10000);
+    return ()=>clearInterval(iv);
+  },[authed]);
 
   const persistStore = (next)=>{
     setStore(next);
-    try{ localStorage.setItem(STORE_KEY, JSON.stringify(next));
-      setSaveMsg("保存しました"); setTimeout(()=>setSaveMsg(""),1500);
-    }catch(e){ setSaveMsg("保存に失敗"); }
+    // ローカルにも控える（オフライン保険）
+    try{ localStorage.setItem(STORE_KEY, JSON.stringify(next)); }catch(e){}
+    if(dbReady){
+      // 連続入力をまとめて保存（デバウンス）
+      if(saveTimer.current) clearTimeout(saveTimer.current);
+      setSaveMsg("保存中…");
+      saveTimer.current = setTimeout(async()=>{
+        try{
+          await saveShared(next);
+          lastSeenUpdate.current = await fetchUpdatedAt();
+          setOnline(true);
+          setSaveMsg("共有に保存しました"); setTimeout(()=>setSaveMsg(""),1500);
+        }catch(e){
+          setOnline(false);
+          setSaveMsg("保存失敗（通信）"); setTimeout(()=>setSaveMsg(""),2500);
+        }
+      }, 700);
+    } else {
+      setSaveMsg("保存しました（この端末のみ）"); setTimeout(()=>setSaveMsg(""),1500);
+    }
   };
 
   // 現在の年度の月データ（data）を従来どおり扱えるようにする
@@ -379,6 +448,32 @@ ${lines.join("\n")}
   const yearSummary = store.summaries?.[year];
   const prevYearSummary = store.summaries?.[year-1];
 
+  // 入口の合言葉ゲート
+  const tryLogin = ()=>{
+    if(pwInput===PASSCODE){
+      try{ sessionStorage.setItem(SESSION_KEY,"1"); }catch(e){}
+      setAuthed(true); setPwError(false);
+    } else { setPwError(true); }
+  };
+  if(!authed){
+    return (
+      <div className="gate">
+        <style>{CSS}</style>
+        <div className="gate-card">
+          <div className="hd-mark">PDCA</div>
+          <h1 className="gate-h1">箱根アクションプラン管理</h1>
+          <p className="gate-sub">スタッフ共有用。合言葉を入力してください。</p>
+          <input className="gate-in" type="password" value={pwInput} placeholder="合言葉"
+            onChange={e=>{setPwInput(e.target.value); setPwError(false);}}
+            onKeyDown={e=>{ if(e.key==="Enter") tryLogin(); }} autoFocus/>
+          {pwError && <div className="gate-err">合言葉が違います。</div>}
+          <button className="gate-btn" onClick={tryLogin}>入る</button>
+          {!dbReady && <div className="gate-note">※共有データベースが未設定です。管理者は環境変数 VITE_SUPABASE_URL / VITE_SUPABASE_KEY を設定してください。</div>}
+        </div>
+      </div>
+    );
+  }
+
   if(!loaded) return <div style={{padding:40,fontFamily:"sans-serif"}}>読み込み中…</div>;
 
   return (
@@ -388,7 +483,7 @@ ${lines.join("\n")}
         <div className="hd-mark">PDCA</div>
         <div>
           <h1>{year}年度 箱根アクションプラン管理</h1>
-          <p className="sub">箱根クラフトハウス／マネージャー用 数値目標 × PDCA ・ 4月〜3月 月次管理</p>
+          <p className="sub">箱根クラフトハウス／マネージャー用 ・ {dbReady ? (online?"共有モード（全スタッフで同期）":"共有モード（接続待ち…）") : "この端末のみ保存"}</p>
         </div>
         {saveMsg && <span className="savechip">{saveMsg}</span>}
       </header>
@@ -704,6 +799,25 @@ h1{font-size:22px;margin:0;letter-spacing:.02em}
 .ye-meta{font-size:11px;color:#9a9180;margin-bottom:10px}
 .ye-text{font-size:13px;line-height:1.9;white-space:pre-wrap;color:var(--ink)}
 .ye-note{margin-top:14px;padding-top:10px;border-top:1px dashed var(--line);font-size:11.5px;color:#7a7363}
+.gate{min-height:100vh;display:grid;place-items:center;padding:24px;
+  font-family:"Hiragino Kaku Gothic ProN","Yu Gothic",sans-serif;
+  background:radial-gradient(circle at 30% 0%,rgba(194,96,58,.12),transparent 45%),
+   radial-gradient(circle at 90% 100%,rgba(47,107,107,.12),transparent 45%),#f3efe6}
+.gate-card{background:#fffdf8;border:1px solid #e0d8c8;border-radius:20px;padding:34px 30px;
+  width:100%;max-width:360px;text-align:center;box-shadow:0 10px 40px rgba(40,30,15,.1)}
+.gate-card .hd-mark{width:54px;height:54px;border-radius:14px;margin:0 auto 16px;display:grid;
+  place-items:center;background:linear-gradient(135deg,#c2603a,#e0824f);color:#fff;font-weight:800;
+  letter-spacing:.06em;font-size:14px}
+.gate-h1{font-size:19px;margin:0 0 6px;color:#1d2b2a}
+.gate-sub{font-size:12.5px;color:#6c6555;margin:0 0 18px}
+.gate-in{width:100%;border:1px solid #e0d8c8;border-radius:10px;padding:11px 13px;font-size:15px;
+  font-family:inherit;text-align:center;letter-spacing:.1em;background:#fff;color:#1d2b2a}
+.gate-in:focus{outline:2px solid #e0824f;outline-offset:1px}
+.gate-err{color:#c2603a;font-size:12px;margin-top:8px;font-weight:600}
+.gate-btn{width:100%;margin-top:14px;background:#1d2b2a;color:#fff;border:none;border-radius:10px;
+  padding:12px;font-size:14px;font-weight:700;cursor:pointer}
+.gate-btn:hover{background:#c2603a}
+.gate-note{margin-top:16px;font-size:11px;color:#9a9180;line-height:1.6}
 .vtabs{display:flex;gap:4px;margin-bottom:14px;background:#ece5d6;padding:4px;border-radius:11px;width:fit-content;flex-wrap:wrap}
 .vtab{border:none;background:transparent;color:#6c6555;padding:8px 16px;border-radius:8px;
   font-size:13px;font-weight:700;cursor:pointer;transition:.15s}
